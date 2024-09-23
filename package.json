@@ -7,9 +7,19 @@
     "serve": "vite preview"
   },
   "devDependencies": {
-    "vite": "^2.0.5"
+    "vite": "^5.4.7"
   },
   "dependencies": {
-    "firebase": "^8.2.10"
-  }
+    "express": "^4.21.0",
+    "firebase": "^8.2.10",
+    "sqlite3": "^5.1.7",
+    "webrtc-demo": "file:",
+    "websocket": "^1.0.35",
+    "ws": "^8.18.0"
+  },
+  "description": "Build a 1-to-1 video chat feature with WebRTC, Firestore, and JavaScript.",
+  "main": "main.js",
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
 }

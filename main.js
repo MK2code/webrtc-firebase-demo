@@ -1,17 +1,5 @@
 import './style.css';
 
-import firebase from 'firebase/app';
-import 'firebase/firestore';
-
-const firebaseConfig = {
-  // your config
-};
-
-if (!firebase.apps.length) {
-  firebase.initializeApp(firebaseConfig);
-}
-const firestore = firebase.firestore();
-
 const servers = {
   iceServers: [
     {
@@ -22,10 +10,11 @@ const servers = {
 };
 
 // Global State
+const localIP = '172.31.50.32';
+let socket;
 const pc = new RTCPeerConnection(servers);
 let localStream = null;
 let remoteStream = null;
-
 // HTML elements
 const webcamButton = document.getElementById('webcamButton');
 const webcamVideo = document.getElementById('webcamVideo');
@@ -36,111 +25,167 @@ const remoteVideo = document.getElementById('remoteVideo');
 const hangupButton = document.getElementById('hangupButton');
 
 // 1. Setup media sources
+// Client-side WebRTC using WebSocket
 
+function connectToWebSocket() {
+  socket = new WebSocket(`ws://${localIP}:8080`);
+
+  socket.onopen = () => {
+    console.log('Connected to WebSocket server');
+    // Now that connection is open, you can enable the call and answer buttons
+    callButton.disabled = false;
+    answerButton.disabled = false;
+  };
+
+  socket.onerror = (error) => {
+    console.error('WebSocket error:', error);
+  };
+
+  socket.onmessage = (message) => {
+    const data = JSON.parse(message.data);
+
+    if (data.type === 'offer') {
+      const offerDescription = new RTCSessionDescription({
+        type: 'offer',
+        sdp: data.offer
+      });
+      pc.setRemoteDescription(offerDescription);
+    } else if (data.type === 'answer') {
+      const answerDescription = new RTCSessionDescription({
+        type: 'answer',
+        sdp: data.answer
+      });
+      pc.setRemoteDescription(answerDescription);
+    } else if (data.type === 'candidate') {
+      const candidate = new RTCIceCandidate(data.candidate);
+      pc.addIceCandidate(candidate);
+    }
+  };
+}
+
+
+// When receiving messages from the WebSocket server
+// socket.onmessage = (message) => {
+//   const data = JSON.parse(message.data);
+
+//   if (data.type === 'offer') {
+//     const offerDescription = new RTCSessionDescription({
+//       type: 'offer',
+//       sdp: data.offer
+//     });
+//     pc.setRemoteDescription(offerDescription);
+//   } else if (data.type === 'answer') {
+//     const answerDescription = new RTCSessionDescription({
+//       type: 'answer',
+//       sdp: data.answer
+//     });
+//     pc.setRemoteDescription(answerDescription);
+//   } else if (data.type === 'candidate') {
+//     const candidate = new RTCIceCandidate(data.candidate);
+//     pc.addIceCandidate(candidate);
+//   }
+// };
+
+// Webcam setup
 webcamButton.onclick = async () => {
-  localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+    localStream.getTracks().forEach((track) => {
+      pc.addTrack(track, localStream);
+    });
+    webcamVideo.srcObject = localStream;
+  } catch (error) {
+    console.warn('No camera available, continuing without local video stream.');
+    // If no camera, skip setting up the local stream
+  }
+
   remoteStream = new MediaStream();
-
-  // Push tracks from local stream to peer connection
-  localStream.getTracks().forEach((track) => {
-    pc.addTrack(track, localStream);
-  });
-
-  // Pull tracks from remote stream, add to video stream
   pc.ontrack = (event) => {
     event.streams[0].getTracks().forEach((track) => {
       remoteStream.addTrack(track);
     });
   };
 
-  webcamVideo.srcObject = localStream;
   remoteVideo.srcObject = remoteStream;
-
   callButton.disabled = false;
   answerButton.disabled = false;
   webcamButton.disabled = true;
 };
 
-// 2. Create an offer
+// Create offer
 callButton.onclick = async () => {
-  // Reference Firestore collections for signaling
-  const callDoc = firestore.collection('calls').doc();
-  const offerCandidates = callDoc.collection('offerCandidates');
-  const answerCandidates = callDoc.collection('answerCandidates');
+  if (socket.readyState !== WebSocket.OPEN) {
+    console.log('Waiting for WebSocket connection to open...');
+    return;  // Prevent sending offer before WebSocket is ready
+  }
 
-  callInput.value = callDoc.id;
-
-  // Get candidates for caller, save to db
-  pc.onicecandidate = (event) => {
-    event.candidate && offerCandidates.add(event.candidate.toJSON());
-  };
-
-  // Create offer
   const offerDescription = await pc.createOffer();
   await pc.setLocalDescription(offerDescription);
 
-  const offer = {
-    sdp: offerDescription.sdp,
-    type: offerDescription.type,
-  };
+  const callId = Math.random().toString(36).substring(2, 15);
+  callInput.value = callId;
 
-  await callDoc.set({ offer });
+  socket.send(JSON.stringify({
+    type: 'offer',
+    callId: callId,
+    offer: offerDescription.sdp
+  }));
 
-  // Listen for remote answer
-  callDoc.onSnapshot((snapshot) => {
-    const data = snapshot.data();
-    if (!pc.currentRemoteDescription && data?.answer) {
-      const answerDescription = new RTCSessionDescription(data.answer);
-      pc.setRemoteDescription(answerDescription);
+  pc.onicecandidate = (event) => {
+    if (event.candidate) {
+      socket.send(JSON.stringify({
+        type: 'candidate',
+        callId: callId,
+        candidate: event.candidate.toJSON(),
+        candidateType: 'offer'
+      }));
     }
-  });
-
-  // When answered, add candidate to peer connection
-  answerCandidates.onSnapshot((snapshot) => {
-    snapshot.docChanges().forEach((change) => {
-      if (change.type === 'added') {
-        const candidate = new RTCIceCandidate(change.doc.data());
-        pc.addIceCandidate(candidate);
-      }
-    });
-  });
+  };
 
   hangupButton.disabled = false;
 };
 
-// 3. Answer the call with the unique ID
+// Answer the call (no change here)
 answerButton.onclick = async () => {
+  if (socket.readyState !== WebSocket.OPEN) {
+    console.log('Waiting for WebSocket connection to open...');
+    return;  // Prevent sending before WebSocket is ready
+  }
+
   const callId = callInput.value;
-  const callDoc = firestore.collection('calls').doc(callId);
-  const answerCandidates = callDoc.collection('answerCandidates');
-  const offerCandidates = callDoc.collection('offerCandidates');
+  socket.send(JSON.stringify({ type: 'get-offer', callId: callId }));
 
-  pc.onicecandidate = (event) => {
-    event.candidate && answerCandidates.add(event.candidate.toJSON());
+  socket.onmessage = async (message) => {
+    const data = JSON.parse(message.data);
+    if (data.type === 'offer') {
+      const offerDescription = new RTCSessionDescription({
+        type: 'offer',
+        sdp: data.offer
+      });
+      await pc.setRemoteDescription(offerDescription);
+
+      const answerDescription = await pc.createAnswer();
+      await pc.setLocalDescription(answerDescription);
+
+      socket.send(JSON.stringify({
+        type: 'answer',
+        callId: callId,
+        answer: answerDescription.sdp
+      }));
+
+      pc.onicecandidate = (event) => {
+        if (event.candidate) {
+          socket.send(JSON.stringify({
+            type: 'candidate',
+            callId: callId,
+            candidate: event.candidate.toJSON(),
+            candidateType: 'answer'
+          }));
+        }
+      };
+    }
   };
-
-  const callData = (await callDoc.get()).data();
-
-  const offerDescription = callData.offer;
-  await pc.setRemoteDescription(new RTCSessionDescription(offerDescription));
-
-  const answerDescription = await pc.createAnswer();
-  await pc.setLocalDescription(answerDescription);
-
-  const answer = {
-    type: answerDescription.type,
-    sdp: answerDescription.sdp,
-  };
-
-  await callDoc.update({ answer });
-
-  offerCandidates.onSnapshot((snapshot) => {
-    snapshot.docChanges().forEach((change) => {
-      console.log(change);
-      if (change.type === 'added') {
-        let data = change.doc.data();
-        pc.addIceCandidate(new RTCIceCandidate(data));
-      }
-    });
-  });
 };
+
+
+window.onload = connectToWebSocket;
